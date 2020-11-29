@@ -6,6 +6,15 @@ use structopt::StructOpt;
 const MAX_SETS: u32 = 6;
 const MAX_REPS: u32 = 5;
 
+type DistributionFn = fn(f32, f32) -> f32;
+
+#[derive(Debug)]
+enum Distribution {
+    Classic,
+    Sin,
+    Linear,
+}
+
 fn parse_sets(s: &str) -> Result<u32, String> {
     let value =
     match u32::from_str_radix(s, 10) {
@@ -20,6 +29,15 @@ fn parse_sets(s: &str) -> Result<u32, String> {
     Ok(value)
 }
 
+fn parse_dist(s: &str) -> Result<Distribution, String> {
+    match s {
+        "c" | "classic" => Ok(Distribution::Classic),
+        "s" | "sin" => Ok(Distribution::Sin),
+        "l" | "linear" => Ok(Distribution::Linear),
+        _ => Err(format!("Must be one of: classic sin linear")),
+    }
+}
+
 #[derive(StructOpt, Debug)]
 #[structopt(about, author)]
 struct Options {
@@ -28,47 +46,55 @@ struct Options {
     bar: u32,
 
     /// The number of sets.
-    #[structopt(short, long, default_value = "5", parse(try_from_str = parse_sets))]
+    #[structopt(short, long, default_value = "4", parse(try_from_str = parse_sets))]
     sets: u32,
+
+    #[structopt(short, long, default_value = "sin", parse(try_from_str = parse_dist))]
+    dist: Distribution,
 
     /// Sets the weight of the work set.  Must be great than or equal to the bar weight.
     work_set: u32,
 }
 
 struct Set {
+    /// The total weight of the set
     weight: u32,
+    /// The number of repititions
     reps: u32,
-    sets: u32,
+    /// The number of times the set is repeated
+    repeat: u32,
 }
 
 impl fmt::Display for Set {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}x{}x{}", self.weight, self.reps, self.sets)
+        write!(f, "{}x{}x{}", self.weight, self.reps, self.repeat)
     }
 }
 
 impl fmt::Debug for Set {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}x{}x{}", self.weight, self.reps, self.sets)
+        write!(f, "{}x{}x{}", self.weight, self.reps, self.repeat)
     }
 }
 
 fn main() {
-    // let matches = cli::build().get_matches();
-    // let cfg = Config::from_matches(&matches);
     let options = Options::from_args();
-
-    let sets = get_sets(options.bar, options.work_set, options.sets);
+    let set_weights = match options.dist {
+        Distribution::Classic => block_weights_classic(options.bar, options.work_set, options.sets),
+        Distribution::Sin => block_weights_dist(options.bar, options.work_set, options.sets, dist_sin),
+        Distribution::Linear => block_weights_dist(options.bar, options.work_set, options.sets, dist_linear),
+    };
+    let sets = get_sets(&set_weights);
     print_sets(options.bar, &sets);
 }
 
-fn print_sets(base: u32, sets: &Vec<Set>) {
+fn print_sets(base: u32, sets: &[Set]) {
     for set in sets {
         println!("{:>7} {:?}", set.to_string(), get_plates(set.weight - base));
     }
 }
 
-fn get_sets(min: u32, max: u32, sets: u32) -> Vec<Set> {
+fn block_weights_classic(min: u32, max: u32, sets: u32) -> Vec<u32> {
     let mut rv = Vec::new();
     let delta = round_up_5((max - min) / (sets - 1));
 
@@ -81,14 +107,24 @@ fn get_sets(min: u32, max: u32, sets: u32) -> Vec<Set> {
 
         let weight = cmp::min(min + delta * set, set_max);
 
-        rv.push(Set {
-            weight: weight,
-            reps: get_reps(set, sets),
-            sets: get_sub_sets(set, sets),
-        });
+        rv.push(weight);
     }
 
     rv
+}
+
+fn get_sets(set_weights: &[u32]) -> Vec<Set> {
+    let num_sets = set_weights.len();
+
+    set_weights
+        .iter()
+        .enumerate()
+        .map(|(set_idx, weight)| Set{
+            weight: *weight,
+            reps: get_reps(set_idx as u32, num_sets as u32),
+            repeat: get_set_repeats(set_idx as u32, num_sets as u32),
+        })
+        .collect()
 }
 
 fn round_up_5(x: u32) -> u32 {
@@ -105,7 +141,7 @@ fn get_reps(set: u32, sets: u32) -> u32 {
     }
 }
 
-fn get_sub_sets(set: u32, sets: u32) -> u32 {
+fn get_set_repeats(set: u32, sets: u32) -> u32 {
     let lower_bound = 0;
     let upper_bound = sets - 1;
 
@@ -153,6 +189,37 @@ fn get_plates(weight: u32) -> Vec<f64> {
     panic!("no solution found");
 }
 
+fn dist_sin(x: f32, delta_normalized: f32) -> f32 {
+    delta_normalized * (std::f32::consts::PI * x / delta_normalized / 2.0).sin()
+}
+
+fn dist_linear(x: f32, _: f32) -> f32 {
+    x
+}
+
+fn weights(min: u32, max: u32, num_sets: u32) -> Vec<u32> {
+    block_weights_dist(min, max, num_sets, dist_linear)
+}
+
+fn block_weights_dist(min: u32, max: u32, num_sets: u32, dist: DistributionFn) -> Vec<u32> {
+    let delta = max - min;
+    let delta_normalized = delta as f32 / 5.0;
+    let increment = delta_normalized / (num_sets - 1) as f32;
+
+    (0..num_sets)
+        // Create even spread
+        .map(|x| x as f32 * increment)
+        // Distribute
+        .map(|x| dist(x, delta_normalized))
+        // Convert
+        .map(|x| x as u32)
+        // Denormalize
+        .map(|x| x * 5)
+        // Offset
+        .map(|x| x + min)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     mod round_up_5 {
@@ -170,34 +237,91 @@ mod tests {
         }
     }
 
-    mod get_sets {
+    mod block_weights_classic {
         use super::super::*;
+
+        #[test]
+        fn dist_lin() {
+            assert_eq!(
+                weights(45, 85, 5),
+                vec![45, 55, 65, 75, 85],
+            );
+
+            assert_eq!(
+                weights(45, 105, 5),
+                vec![45, 60, 75, 90, 105],
+            );
+        }
+
+        #[test]
+        fn dist_lin_fractional() {
+            assert_eq!(
+                weights(45, 90, 5),
+                vec![45, 60, 75, 85, 90],
+            );
+        }
+
+        #[test]
+        fn dist_sin_fractional_delta() {
+            assert_eq!(
+                block_weights_dist(45, 90, 5, dist_sin),
+                vec![45, 60, 75, 85, 90],
+            );
+        }
+
+        #[test]
+        fn dist_sin_large() {
+            assert_eq!(
+                block_weights_dist(65, 185, 4, dist_sin),
+                vec![],
+            );
+        }
+
+        #[test]
+        fn dist_linear_large() {
+            assert_eq!(
+                block_weights_dist(65, 185, 4, dist_linear),
+                vec![],
+            );
+        }
 
         #[test]
         fn typ() {
             assert_eq!(
-                format!("{:?}", get_sets(45, 85, 5)),
-                "[45x5x2, 55x4x1, 65x3x1, 75x2x1, 85x5x3]"
+                block_weights_classic(45, 85, 5),
+                vec![45, 55, 65, 75, 85],
             );
             assert_eq!(
-                format!("{:?}", get_sets(45, 105, 5)),
-                "[45x5x2, 60x4x1, 75x3x1, 90x2x1, 105x5x3]"
+                block_weights_classic(45, 105, 5),
+                vec![45, 60, 75, 90, 105],
             );
         }
 
         #[test]
         fn fractional_delta() {
             assert_eq!(
-                format!("{:?}", get_sets(45, 90, 5)),
-                "[45x5x2, 60x4x1, 75x3x1, 85x2x1, 90x5x3]"
+                block_weights_classic(45, 90, 5),
+                vec![45, 60, 75, 85, 90],
             );
             assert_eq!(
-                format!("{:?}", get_sets(45, 95, 5)),
-                "[45x5x2, 60x4x1, 75x3x1, 90x2x1, 95x5x3]"
+                block_weights_classic(45, 95, 5),
+                vec![45, 60, 75, 90, 95],
             );
             assert_eq!(
-                format!("{:?}", get_sets(45, 100, 5)),
-                "[45x5x2, 60x4x1, 75x3x1, 90x2x1, 100x5x3]"
+                block_weights_classic(45, 100, 5),
+                vec![45, 60, 75, 90, 100],
+            );
+        }
+    }
+
+    mod get_sets {
+        use super::super::*;
+
+        #[test]
+        fn basic() {
+            assert_eq!(
+                format!("{:?}", get_sets(&block_weights_classic(45, 85, 5))),
+                "[45x5x2, 55x4x1, 65x3x1, 75x2x1, 85x5x3]"
             );
         }
     }
@@ -230,23 +354,23 @@ mod tests {
         }
     }
 
-    mod get_sub_sets {
+    mod get_set_repeats {
         use super::super::*;
 
         #[test]
         fn min() {
-            assert_eq!(get_sub_sets(0, 5), 2);
+            assert_eq!(get_set_repeats(0, 5), 2);
         }
 
         #[test]
         fn max() {
-            assert_eq!(get_sub_sets(4, 5), 3);
-            assert_eq!(get_sub_sets(0, 1), 3);
+            assert_eq!(get_set_repeats(4, 5), 3);
+            assert_eq!(get_set_repeats(0, 1), 3);
         }
 
         #[test]
         fn mid() {
-            assert_eq!(get_sub_sets(3, 5), 1);
+            assert_eq!(get_set_repeats(3, 5), 1);
         }
     }
 
